@@ -2,22 +2,22 @@
 # Distribution only based on its laplace transform function `f` and exponential tilting `c²`.
 # The sampling is from Ridout, M. S. (2009). Generating random numbers from a distribution specified by its laplace transform. Statistics and Computing, 19(4):439.
 # And the inverse laplace operation is done via Grassmann, W. K. (Ed.). (2000). Computational Probability. International Series in #Operations Research & Management Science. doi:10.1007/978-1-4757-4828-4
-struct LaplaceTransformDistribution{T,TAlg} <:
+struct LaplaceTransformDistribution{T,Tφ,TAlg} <:
        Distributions.ContinuousUnivariateDistribution
-    f::Function # Laplace transform of the pdf
+    φ::Tφ # Laplace transform of the pdf
     c²::T # Exponential tilting parameter
     alg::TAlg # Algorithm to compute the inverse Laplace transform
     function LaplaceTransformDistribution{T,TAlg}(
-        f::Function, c²::T, alg::TAlg
-    ) where {T<:Real,TAlg}
+        f::Tφ, c²::T, alg::TAlg
+    ) where {T<:Real,Tφ,TAlg}
         _check_f(f) || error("The function passed is not valid") # Do a series of checks on f
         c² >= 0 || error("c² has to a be non-negative real")
-        return new{T,TAlg}(f, c², alg)
+        return new{T,Tφ,TAlg}(f, c², alg)
     end
 end
 
 function LaplaceTransformDistribution(
-    f::Function, c²::T=0.0, alg::TAlg=BromwichInverseLaplace()
+    f, c²::T=0.0, alg::TAlg=BromwichInverseLaplace()
 ) where {T,TAlg}
     return LaplaceTransformDistribution{T,TAlg}(f, c², alg)
 end
@@ -25,20 +25,20 @@ end
 function _check_f(f)
     return true # TODO Add tests for complete monotonicity / PDR
 end
-_gradf(d::LaplaceTransformDistribution, x::Real) = first(ForwardDiff.gradient(d.f, [x]))
+_gradf(d::LaplaceTransformDistribution, x::Real) = first(ForwardDiff.gradient(d.φ ∘ first, [x]))
 function _gradlogf(d::LaplaceTransformDistribution, x::Real)
-    return first(ForwardDiff.gradient(log ∘ d.f, [x]))
+    return first(ForwardDiff.gradient(log ∘ d.φ ∘ first, [x]))
 end
 function _hessianlogf(d::LaplaceTransformDistribution, x::Real)
-    return first(ForwardDiff.hessian(log ∘ d.f, [x]))
+    return first(ForwardDiff.hessian(log ∘ d.φ ∘ first, [x]))
 end
 
 Distributions.pdf(dist::LaplaceTransformDistribution, x::Real) = apply_f(dist, x)
 function Distributions.mean(dist::LaplaceTransformDistribution)
-    return _gradf(dist, dist.c²) / dist.f(dist.c²)
+    return -_gradlogf(dist, dist.c²)# _gradf(dist, dist.c²) / dist.f(dist.c²)
 end
 function Distributions.var(dist::LaplaceTransformDistribution)
-    return _hessianlogf(dist, dist.c²) / dist.f(dist.c²) - mean(dist)^2
+    return _hessianlogf(dist, dist.c²) / dist.φ(dist.c²) - mean(dist)^2
 end
 
 function Random.rand(dist::LaplaceTransformDistribution)
@@ -81,10 +81,10 @@ struct BromwichInverseLaplace{T}
     b::Vector{T}
     s::Vector{T}
     function BromwichInverseLaplace(A::Int=19, l::Int=1, m::Int=11, n::Int=28)
-        @assert A > 0 "A should be a positive integer"
-        @assert l > 0 "l should be a positive integer"
-        @assert m > 0 "m should be a positive integer"
-        @assert n > 0 "n should be a positive integer"
+        A > 0 || error("A should be a positive integer")
+        l > 0 || error("l should be a positive integer")
+        m > 0 || error("m should be a positive integer")
+        n > 0 || error("n should be a positive integer")
         T = typeof(exp(A / (2 * l)))
         ijπl = 1im .* (1:l) .* π / l
         return new{T}(
@@ -107,7 +107,7 @@ end
     if t == 0
         return zero(t)
     else
-        invlaplace(dist.f, t, dist.alg)
+        invlaplace(dist.φ, t, dist.alg)
     end
 end
 
@@ -115,7 +115,7 @@ end
     if t == 0
         return zero(t)
     else
-        invlaplace(s -> dist.f(s) / s, t, dist.alg)
+        invlaplace(s -> dist.φ(s) / s, t, dist.alg)
     end
 end
 

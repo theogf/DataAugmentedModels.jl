@@ -3,6 +3,7 @@ module ComplementaryDistributions
 using Distributions
 using Random
 using SpecialFunctions
+using ForwardDiff
 using StatsFuns: twoπ
 
 export GeneralizedInverseGaussian, PolyaGamma, LaplaceTransformDistribution

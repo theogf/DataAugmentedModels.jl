@@ -1,27 +1,39 @@
+"""
+Template file for automatically generated likelihood creation
+"""
+
 macro augmodel()
     @error "You need to provide a list of arguments, please check the documentation on the macro"
 end
 
-"""
-** Likelihood**
-Template file for likelihood creation
-
-
-```julia
-()
-```
-See all functions you need to implement
----
-
-
-"""
 const InputSymbol = Union{Symbol,Expr,Real}
 
 check_model_name(name::Symbol) = !isnothing(match(r"[^\w]*", string(name)))
 
 function treat_likelihood(likelihood::Expr) end
+using MacroTools
+function treat_functions(expr, args)
+    for arg in args
+        expr = MacroTools.postwalk(expr) do x
+            @capture(x, $(arg)) || return x
+            return :(l.$(arg))
+        end
+    end
+    if expr == :(0)
+        return :(zero(T))
+    elseif expr == :(1)
+        return :(one(T))
+    else
+        return expr
+    end
+end
+function correct_input(expr, input)
+    return expr = MacroTools.postwalk(expr) do x
+        @capture(x, x | r | f) || return x
+        return input
+    end
+end
 
-function treat_params(params) end
 
 function correct_parenthesis(text::AbstractString)
     return replace(text, r"(?=[()*+-.])" => "\\")
@@ -33,65 +45,43 @@ end
 
 const AGP = AugmentedGaussianProcesses
 
-macro augmodel(name::Symbol, likelihoodtype::Symbol, likelihood::Expr, params)
-    latent = :x
-    @assert occursin(r"p\(y\s*|\s*\w\)", string(likelihood)) "Likelihood should be of the form p(y|x) = C*exp(g(y)*x)*φ(α(y)-β(y)*x+γ(y)*x^2), replacing all functions by 0 if necessary"
-    pdf_string = string(likelihood.args[2].args[2])
-    # @show pdfexpr = Meta.parse(pdfstring)
-    C_string = match(r".*?(?= (\* exp\(.*x\)))", pdf_string).match
-    G_string_f =
-        match(
-            Regex("(?<=$(AGP.correct_parenthesis(C_string)) \\* exp\\().*(?=x\\) \\*)"),
-            pdf_string,
-        ).match
-    G_string = deepcopy(G_string_f)
-    while last(G_string) == ' ' || last(G_string) == '*'
-        G_string = G_string[1:(end - 1)]
-    end
-    phi_h_string =
-        match(
-            Regex("(?<=$(AGP.correct_parenthesis(G_string_f))x\\) \\* ).*"), pdf_string
-        ).match
-    loc_x² = findfirst("x ^ 2", phi_h_string)
-    count_parenthesis = 1
-    loc_start = loc_x²[1]
-    while count_parenthesis != 0
-        loc_start = loc_start - 1
-        if phi_h_string[loc_start] == ')'
-            count_parenthesis += 1
-        elseif phi_h_string[loc_start] == '('
-            count_parenthesis -= 1
-        end
-    end
-    h_string = phi_h_string[(loc_start + 1):loc_x²[end]]
-    phi_string = phi_h_string[1:loc_start] * "r" * phi_h_string[(loc_x²[end] + 1):end]
-    @show alpha_string = match(r"[^(][^-]*", h_string).match[1:(end - 1)]
-    gamma_string = match(r"(?<=\+ )[^x]*(?=x \^ 2)", h_string).match
-    gamma_string = gamma_string == "" ? "1.0" : gamma_string
-    count_parenthesis -= 1
-    h_string = phi_h_string[(loc_start + 1):loc_x²[end]]
-    phi_string = phi_h_string[1:loc_start] * "r" * phi_h_string[(loc_x²[end] + 1):end]
-    @show alpha_string = match(r"[^(][^-]*", h_string).match[1:(end - 1)]
-    gamma_string = match(r"(?<=\+ )[^x]*(?=x \^ 2)", h_string).match
-    gamma_string = gamma_string == "" ? "1.0" : gamma_string
-    while last(gamma_string) == ' ' || last(gamma_string) == '*'
-        gamma_string = gamma_string[1:(end - 1)]
-    end
-    beta_string =
-        match(
-            Regex("(?<=$(AGP.correct_parenthesis(alpha_string)) -  )[^( x )]*(?= x)"),
-            h_string,
-        ).match
-    while last(beta_string) == ' ' || last(beta_string) == '*'
-        beta_string = beta_string[1:(end - 1)]
-    end
-    return (C_string, G_string, phi_string, alpha_string, beta_string, gamma_string)
-    # treat_params(params)
-    # C,g,α,β,γ,φ = treat_likelihood(likelihood)
-end
-
 macro augmodel(name::Symbol, likelihoodtype::Symbol, likelihood::Expr) end
 
+"""
+    @augmodel(name, ltype, C, g, α, β, γ, φ, ∇φ; θ...)
+
+Macro to create an augmentable likelihood, following the theory of 
+"Automated Augmented Conjugate Inference for Non-conjugate Gaussian Process Models", Galy-Fajou et al.
+You should try to write the likelihood as 
+```math
+p(f|y,θ) = C(y;θ)e^{g(y;θ) f}φ(α(y;θ) - β(y;θ)f + γ(y;θ)f^2; θ))
+```
+
+## Arguments
+- `name` : The name of the likelihood
+- `ltype` : The type of likelihood. Options are `Regression`, `Event` or `Classification`
+- `C`, `g`, `α`, `β`, `γ`: Functions expressions depending uniquely on `θ` and `y`. For example `y / θ`
+- `φ` : Positive definite radial function, input should be `x` and `θ`
+- `∇φ` : Derivative of `φ` given `x`
+- `θ` : Here you can set up all your hyperparameters by defining them as `β=2.0, c=1.0` etc. A default value is required!
+
+The parameters you define in `θ` can then be used in your other functions.
+
+## Example (Laplace)
+```julia
+@augmodel(AugLaplace, Regression, 0.5 / β, y^2, 2*y, 1, exp(-sqrt(x))/β), -exp(-sqrt(x)/β) / (2β * sqrt(x)), β=2.0)
+d = AugLaplace(;β=3.0)
+pdf(Laplace(0.0, 3.0), 2.0) == d(0.0, 2.0)
+```
+
+There are a few additional functions that you can define to override the existing generic implementations
+```
+
+- `Statistics.var(l::MyLikelihood)` for adding the variance correctly in `Regression` types of likelihood
+- ``
+
+
+"""
 macro augmodel(
     name,
     ltype,
@@ -101,44 +91,120 @@ macro augmodel(
     β::InputSymbol,
     γ::InputSymbol,
     φ::InputSymbol,
-    ∇φ::InputSymbol,
-    args...,
+    # ∇φ::InputSymbol,
+    addargs...,
 )
-    add_variables = []
-    default_values = []
-    for input in args
-        @assert input.head == :(=) "Additional variables should be given a default value, for example `b=1`"
-        push!(add_variables, input.args[1])
-        push!(default_values, input.args[1])
-    end
-    #### Check args here
-    @assert check_model_name(name) "Please only use alphabetic characters for the name of the likelihood"
-    @assert check_likelihoodtype(ltype) "Please use a correct likelihood type : Regression, Classification or Event"
-    #Find gradient with AD if needed
-    return esc(
-        generate_likelihood(
-            Symbol(name, "Likelihood"), Symbol(ltype, "Likelihood"), C, g, α, β, γ, φ, ∇φ
-        ),
+    ## Check args here
+    check_model_name(name) || error("Please only use alphabetic characters for the name of the likelihood")
+    check_likelihoodtype(ltype) || error("Please use a correct likelihood type : Regression, Classification or Event")
+
+    functions = Dict(
+        :C=>C,
+        :g=>g,
+        :α=>α,
+        :β=>β,
+        :γ=>γ,
+        :φ=>φ,
     )
+    ## Create the needed fields and co
+    fielddefs = quote end
+    fielddefs.args = [:(c²::A), :(θ::A)]
+    args = Any[]
+    kwargs = Expr(:parameters)
+    kwargsvar = Expr(:parameters)
+    for input in addargs
+        input.head == :(=) || error("Additional variables should be given a default value, for example `b=1`")
+        var = input.args[1]
+        val = input.args[2]
+        push!(fielddefs.args, :($(var)::T))
+        push!(args, var)
+        push!(kwargs.args, Expr(:kw, var, val))
+        push!(kwargsvar.args, Expr(:kw, var, var))
+    end
+    # Create the outer default constructor
+    if length(args) > 0
+        outerc = :($(name)($kwargs) = $(name){Float64}($kwargsvar))
+    else
+        outerc = :($(name)() = $(name){Float64}())
+    end
+    # Create inner constructor using kwargs only
+    if length(args) > 0
+        innerc1 = :( $(name){T}($(kwargs)) where {T<:Real} = new{T,Vector{T}}($(vcat(:([]), :([]), args)...)))
+    else
+        innerc1 = :( $(name){T}() where {T<:Real} = new{T,Vector{T}}([], []))
+    end
+    # Create inner constructor with additional parameters
+    if length(args) > 0
+        all_args = [kwargs, :(c²::A), :(θ::A)]
+        innerc2 = :( $(name){T}($(all_args...)) where {T<:Real,A<:AbstractVector{T}}= new{T,A}(c², θ, $(args...)))
+        # push!(innerc2.args[1].args, kwargs)
+    else
+        innerc2 = :( $(name){T}(c²::A, θ::A) where {T<:Real,A<:AbstractVector{T}} = new{T,A}(c², θ))
+    end
+
+    # Replace occurences of the given parameters in the functions
+    for f in keys(functions)
+        functions[f] = treat_functions(functions[f], args)
+    end
+    functions[:φ] = correct_input(functions[:φ], :r)
+    # functions[:∇φ] = correct_input(functions[:∇φ], :r)
+
+    if length(args) > 0
+        l_args = [:(zeros(T, nSamplesUsed)), :(zeros(T, nSamplesUsed))]
+        l_kwargs = Expr(:parameters)
+        # all_args = [:(c²::A), :(θ::A), kwargs.args...]
+        for arg in args
+            push!(l_kwargs.args, Expr(:kw, arg, :(l.$(arg))))
+        end
+        l_args = vcat(l_kwargs, l_args)
+        init_like = quote
+            function AGP.init_likelihood(
+                l::$(name){T},
+                i::AGP.AbstractInference{T},
+                nLatent::Int,
+                nSamplesUsed::Int,
+            ) where {T}
+                if i isa AnalyticVI || i isa GibbsSampling
+                    $(name){T}($(l_args...))
+                else
+                    $(name){T}($(l_kwargs))
+                end
+            end
+        end
+    else
+        init_like = quote
+            function AGP.init_likelihood(
+                l::$(name){T},
+                i::AGP.AbstractInference{T},
+                nLatent::Int,
+                nSamplesUsed::Int,
+            ) where {T}
+                if inference isa AnalyticVI || inference isa GibbsSampling
+                    $(name){T}(zeros(T, nSamplesUsed), zeros(T, nSamplesUsed))
+                else
+                    $(name){T}()
+                end
+            end
+        end
+    end
+
+    @show __module__
+    return esc(generate_likelihood(
+            Symbol(name), Symbol(ltype, "Likelihood"), functions, fielddefs, outerc, innerc1, innerc2, init_like
+        ))
 end
-function generate_likelihood(lname, ltype, C, g, α, β, γ, φ, ∇φ)
+function generate_likelihood(lname, ltype, functions, fielddefs, outerc, innerc1, innerc2, init_like)
     quote
         begin
             using Statistics
+            using Distributions
             struct $(lname){T<:Real,A<:AbstractVector{T}} <: AGP.$(ltype){T}
-                c²::A
-                θ::A
-                function $(lname){T}() where {T<:Real}
-                    return new{T,Vector{T}}()
-                end
-                function $(lname){T}(c²::A, θ::A) where {T<:Real,A<:AbstractVector{T}}
-                    return new{T,A}(c², θ)
-                end
+                $(fielddefs)
+                $(innerc1)
+                $(innerc2)
             end
 
-            function $(lname)()
-                return $(lname){Float64}()
-            end
+            $(outerc)
 
             function AGP.implemented(
                 ::$(lname), ::Union{<:AnalyticVI,<:QuadratureVI,<:GibbsSampling}
@@ -146,18 +212,7 @@ function generate_likelihood(lname, ltype, C, g, α, β, γ, φ, ∇φ)
                 return true
             end
 
-            function AGP.init_likelihood(
-                likelihood::$(lname){T},
-                inference::AbstractInference{T},
-                nLatent::Int,
-                nSamplesUsed::Int,
-            ) where {T}
-                if inference isa AnalyticVI || inference isa GibbsSampling
-                    $(lname){T}(zeros(T, nSamplesUsed), zeros(T, nSamplesUsed))
-                else
-                    $(lname){T}()
-                end
-            end
+            $(init_like)
 
             function (l::$(lname))(y::Real, f::Real)
                 return _gen_C(l) *
@@ -172,44 +227,44 @@ function generate_likelihood(lname, ltype, C, g, α, β, γ, φ, ∇φ)
             end
 
             function _gen_C(l::$(lname){T}) where {T<:Real}
-                return $(C)
+                return $(functions[:C])
             end
 
             function _gen_g(l::$(lname), y::T) where {T<:Real}
-                return $(g)
+                return $(functions[:g])
             end
 
             function _gen_α(l::$(lname), y::T) where {T<:Real}
-                return $(α)
+                return $(functions[:α])
             end
 
             function _gen_β(l::$(lname), y::T) where {T<:Real}
-                return $(β)
+                return $(functions[:β])
             end
 
             function _gen_γ(l::$(lname), y::T) where {T<:Real}
-                return $(γ)
+                return $(functions[:γ])
             end
 
             function _gen_φ(l::$(lname), r::T) where {T<:Real}
-                return $(φ)
+                return $(functions[:φ])
             end
 
             function _gen_∇φ(l::$(lname), r::T) where {T<:Real}
-                return $(∇φ)
+                return first(Zygote.gradient(Base.Fix1(_gen_φ, l), r))
             end
 
             function _gen_∇²φ(l::$(lname), r::T) where {T}
-                return Zygote.gradient(x -> $(∇φ)(x), r)[1]
+                return first(ForwardDiff.gradient(x->_gen_∇φ(l, first(x)), [r]))
             end
 
-            function Base.show(io::IO, model::$(lname){T}) where {T<:Real}
-                return print(io, "$(nameof(typeof(model)))")
+            function Base.show(io::IO, model::$(lname))
+                return print(io, string($lname), " Likelihood")
             end
 
             function Statistics.var(l::$(lname){T}) where {T<:Real}
                 @warn "The variance of the likelihood is not implemented : returnin 0.0"
-                return 0.0
+                return zero(T)
             end
 
             function AGP.compute_proba(
@@ -242,9 +297,8 @@ function generate_likelihood(lname, ltype, C, g, α, β, γ, φ, ∇φ)
                 return l.θ .= -_gen_∇φ.(l, l.c²) ./ _gen_φ.(l, l.c²)
             end
 
-            function pω(::$(lname), f)
-                #TODO Use the Laplace approx sampler
-                @error "You cannot use Gibbs sampling from your likelihood unless you define pω(likelihood,f)"
+            function pω(l::$(lname), c²)
+               AGP.LaplaceTransformDistribution(Base.Fix1(_gen_φ, l), c²)
             end
 
             function AGP.sample_local!(
@@ -252,15 +306,17 @@ function generate_likelihood(lname, ltype, C, g, α, β, γ, φ, ∇φ)
             ) where {T}
                 return set_ω!(
                     l,
-                    pω.(
-                        l,
-                        sqrt.(
-                            0.5 * (
-                                l,
-                                _gen_α.(l, y) - _gen_β.(l, y) .* f +
-                                _gen_γ.(l, y) .* (abs2.(f)),
+                    rand.(
+                        pω.(
+                            l,
+                            sqrt.(
+                                0.5 * (
+                                    l,
+                                    _gen_α.(l, y) - _gen_β.(l, y) .* f +
+                                    _gen_γ.(l, y) .* (abs2.(f)),
+                                ),
                             ),
-                        ),
+                        )
                     ),
                 )
             end
@@ -302,24 +358,24 @@ function generate_likelihood(lname, ltype, C, g, α, β, γ, φ, ∇φ)
 
             ### Gradient Section ###
 
-            @inline function AGP.grad_loglike(
+            @inline function AGP.∇loglikehood(
                 l::$(lname){T}, y::Real, f::Real
             ) where {T<:Real}
-                h² = _gen_α(y) - _gen_β(y) * f + _gen_γ(y) * f^2
-                return _gen_g(y) +
-                       (-_gen_β(y) + 2 * _gen_γ(y) * f) * _gen_∇φ(h²) / _gen_φ(h²)
+                h² = _gen_α(l, y) - _gen_β(l, y) * f + _gen_γ(l, y) * f^2
+                return _gen_g(l, y) +
+                       (-_gen_β(l, y) + 2 * _gen_γ(l, y) * f) * _gen_∇φ(l, h²) / _gen_φ(l, h²)
             end
 
-            @inline function AGP.hessian_loglike(
+            @inline function AGP.hessloglikehood(
                 l::$(lname){T}, y::Real, f::Real
             ) where {T<:Real}
-                h² = _gen_α(y) - _gen_β(y) * f + _gen_γ(y) * f^2
+                h² = _gen_α(l, y) - _gen_β(l, y) * f + _gen_γ(l, y) * f^2
                 φ = _gen_φ(l, h²)
                 ∇φ = _gen_∇φ(l, h²)
                 ∇²φ = _gen_∇²φ(l, h²)
                 return (
-                    2 * _gen_γ(y) * ∇φ / φ - ((-_gen_β(y) + 2 * _gen_γ(y) * f) * ∇φ / φ)^2 +
-                    (-_gen_β(y) + 2 * _gen_γ(y) * f)^2 * ∇²φ / φ
+                    2 * _gen_γ(l, y) * ∇φ / φ - ((-_gen_β(l, y) + 2 * _gen_γ(l, y) * f) * ∇φ / φ)^2 +
+                    (-_gen_β(l, y) + 2 * _gen_γ(l, y) * f)^2 * ∇²φ / φ
                 )
             end
         end
